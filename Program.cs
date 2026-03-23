@@ -4,9 +4,30 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
 using Microsoft.OpenApi.Models;
+using System.Net.NetworkInformation;
 using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Ensure a predictable URL/port
+var urls = builder.Configuration["ASPNETCORE_URLS"] ?? "http://localhost:5291";
+builder.WebHost.UseUrls(urls);
+
+// Fail fast if a port is already in use
+var portsInUse = IPGlobalProperties.GetIPGlobalProperties()
+    .GetActiveTcpListeners()
+    .Select(l => l.Port)
+    .ToHashSet();
+
+var requestedPorts = urls.Split(';', StringSplitOptions.RemoveEmptyEntries)
+    .Select(u => new Uri(u).Port)
+    .Distinct();
+
+if (requestedPorts.Any(p => portsInUse.Contains(p)))
+{
+    Console.Error.WriteLine($"Port already in use. Requested: {string.Join(", ", requestedPorts)}");
+    return;
+}
 
 // ✅ JWT Authentication
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -35,6 +56,9 @@ builder.Services.AddControllers();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"))
 );
+
+// ✅ Health Checks
+builder.Services.AddHealthChecks();
 
 // ✅ Swagger
 builder.Services.AddEndpointsApiExplorer();
@@ -74,12 +98,11 @@ builder.Services.AddSwaggerGen(c =>
 
 var app = builder.Build();
 
-// ✅ Swagger UI
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+app.Logger.LogInformation("Environment: {Environment}", app.Environment.EnvironmentName);
+
+// ✅ Swagger UI (always enabled)
+app.UseSwagger();
+app.UseSwaggerUI();
 
 // ✅ Middleware order IMPORTANT
 app.UseHttpsRedirection();
@@ -88,5 +111,8 @@ app.UseAuthentication(); // must come before authorization
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapHealthChecks("/health");
 
-app.Run();
+await app.StartAsync();
+app.Logger.LogInformation("Listening on: {Urls}", string.Join(", ", app.Urls));
+await app.WaitForShutdownAsync();
